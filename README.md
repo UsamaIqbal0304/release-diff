@@ -105,15 +105,16 @@ themselves a finding. **A canonical pointing at a *third* host still is.**
 Two proofs ship with the tool, because a diff run over two identical trees
 reports nothing and proves nothing — the trees are identical.
 
-**`--selftest`** runs the parsers against bytes held in the file: thirteen
-checks on the three readings that are easy to get wrong and silent when they
-are. An h1 that became a div, a canonical that differs only by host, and a
-measurement id inside a script the visible-copy strip removes.
+**`--selftest`** runs the parsers against bytes held in the file: seventeen
+checks on the four readings that are easy to get wrong and silent when they
+are. An h1 that became a div, a canonical that differs only by host, a
+measurement id inside a script the visible-copy strip removes, and whether a
+chain of redirects has come back to a URL it already asked for.
 
 ```
 $ ./release-diff.py --selftest
 ...
-13 of 13
+17 of 17
 ```
 
 **`prove-it.py`** is the harder one. It serves a built site from disk twice over
@@ -130,11 +131,12 @@ ok   a url pattern moved                -> links
 ok   a title is rewritten in the layout -> title
 ok   an analytics tag stopped firing    -> tags
 ok   the live url stops answering       -> status
+ok   a path redirects to itself         -> BROKEN
 
-7 of 7 failures caught
+8 of 8 failures caught
 ```
 
-The control run matters as much as the seven: if a tree against itself reports
+The control run matters as much as the eight: if a tree against itself reports
 anything, none of the lines under it mean what they say.
 
 It picks the page to break out of your tree rather than having a path baked
@@ -144,7 +146,7 @@ choice. Nothing touches a network: both sides are `http://127.0.0.1` on a port
 the kernel picks, the mutated side is a throwaway copy, and your tree is only
 read.
 
-Two of the seven are worth a note, because they are honest substitutions rather
+Two of the eight are worth a note, because they are honest substitutions rather
 than the failure itself:
 
 - *An analytics tag stopped firing* is tested in the other direction — the tag
@@ -154,6 +156,41 @@ than the failure itself:
   rewrite rule a static server cannot hold. From outside it has one visible
   shape: the live URL stops answering. That is the only part of the failure a
   reader of the two renderings can see, so it is what the gate is held to.
+
+## The one thing it reports without comparing anything
+
+A redirect that names its own URL in `Location` is not a redirect. The browser
+follows it to its own limit and then shows the visitor nothing — and no amount
+of comparing will surface it, because **it is the same nothing on both sides**.
+Every field matches and the path reads `SAME`, which is the one shape a diff is
+blind to by construction.
+
+That is not hypothetical. Reading every URL one UK manufacturer's sitemap
+submits, on 6 October 2026, found eleven of fifty-four answering `301` with
+their own address in `Location`, one of them the privacy policy their own home
+page links twice.
+
+So a path whose chain comes back to a URL it already requested is reported
+absolutely, per side, and fails the run on its own. `--expect` cannot declare
+one, because no release is meant to contain one:
+
+```
+$ ./release-diff.py --old http://127.0.0.1:8001 --new http://127.0.0.1:8001 \
+                    --paths loop.txt
+SAME     /
+BROKEN   /a-path-that-redirects-to-itself/
+    redirect    LOOP       old: redirect loop: 301 to /a-path-that-redirects-to-itself/, which was already requested
+    redirect    LOOP       new: redirect loop: 301 to /a-path-that-redirects-to-itself/, which was already requested
+
+2 redirect loop(s)
+
+2 path(s) read, 0 changed, 0 undeclared field change(s)
+FAIL: a redirect loop shows the visitor nothing, and --expect cannot declare one - no release is meant to contain it.
+```
+
+Both sides are the same host there on purpose. A loop on one side only moves
+the `status` field, and an ordinary diff catches it; the symmetrical case is
+the one that needed its own reading. `prove-it.py` holds the tool to it.
 
 ## Limits, stated rather than discovered later
 

@@ -32,6 +32,15 @@ import threading
 TOOL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "release-diff.py")
 
 
+# The last case is not a mutation of your tree at all, and that is the point of
+# it. Both servers answer this path with a 301 to itself, so both renderings
+# are the same nothing: every field compares equal and the path reads SAME
+# unless the tool reports a loop without reference to the other side. Measured
+# on a live site on 6 Oct 2026, 11 of the 54 URLs one sitemap submitted did
+# exactly this, one of them a privacy policy linked twice from the home page.
+LOOP_PATH = "/a-path-that-redirects-to-itself/"
+
+
 def serve(root):
     """(httpd, base_url). The port is whatever the kernel gives.
 
@@ -46,6 +55,15 @@ def serve(root):
 
         def log_message(self, *a):
             pass
+
+        def send_head(self):
+            if self.path == LOOP_PATH:
+                self.send_response(301)
+                self.send_header("Location", LOOP_PATH)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return None
+            return super().send_head()
 
     httpd = socketserver.TCPServer(("127.0.0.1", 0), H)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -199,10 +217,26 @@ def main():
             if not hit:
                 print(out)
             passed += bool(hit)
+
+        # Both sides are the same host on purpose. A loop on one side only
+        # moves the status field and an ordinary diff catches it; it is the
+        # symmetrical case that needs its own reading.
+        loop_paths = os.path.join(work, "loop-paths.txt")
+        io.open(loop_paths, "w").write(LOOP_PATH + "\n")
+        rc, out = run(base_url, base_url, loop_paths)
+        hit = (rc == 3 and re.search(r"^BROKEN", out, re.M)
+               and "redirect loop" in out and "SAME" not in out)
+        print("%-4s %-34s -> %s" % ("ok" if hit else "MISS",
+                                    "a path redirects to itself", "BROKEN"))
+        if not hit:
+            print(out)
+        passed += bool(hit)
+        total = len(cases) + 1
+
         base.shutdown()
         mut.shutdown()
-        print("\n%d of %d failures caught" % (passed, len(cases)))
-        return 0 if passed == len(cases) else 1
+        print("\n%d of %d failures caught" % (passed, total))
+        return 0 if passed == total else 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

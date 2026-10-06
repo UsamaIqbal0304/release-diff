@@ -76,6 +76,21 @@ import urllib.robotparser
 import zlib
 
 UA = "plantroom-release-diff/1.0 (+https://plantroomlabs.com)"
+# The one defect reported without reference to the other side. The prefix is
+# load-bearing: main() looks for it to tell a loop from a transport error.
+LOOP = "redirect loop: %d to %s, which was already requested"
+
+
+def same_host_path(target, origin):
+    """The target as a path when it is on the host we asked, else in full.
+
+    The rest of the report names redirects by path, and a loop read on a
+    loopback fixture would otherwise carry the kernel's port number into the
+    line - a fact about the test and not about the site."""
+    a, b = urllib.parse.urlsplit(target), urllib.parse.urlsplit(origin)
+    if (a.scheme, a.netloc) != (b.scheme, b.netloc):
+        return target
+    return a.path + (("?" + a.query) if a.query else "")
 TIMEOUT = 25
 FIELDS = ("status", "redirect", "title", "h1", "has_h1", "canonical",
           "robots", "description", "links", "tags", "jsonld")
@@ -133,13 +148,34 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def loop_in(requested):
+    """The first URL a redirect chain asks for twice, or None.
+
+    A diff cannot see this one. A `Location` that names a URL already
+    requested is a loop, the browser stops at its own limit, and the visitor
+    is shown nothing - but it is the same nothing on both renderings, so
+    every field compares equal and the path reads SAME. Measured on a live
+    site on 6 Oct 2026: 11 of the 54 URLs one sitemap submitted answered 301
+    with their own address in `Location`, one of them the privacy policy
+    linked twice from the home page. Nobody declares a loop as a release
+    change, so it is reported absolutely rather than diffed.
+    """
+    seen = set()
+    for u in requested:
+        if u in seen:
+            return u
+        seen.add(u)
+    return None
+
+
 def fetch(url, max_hops=6):
     """(status, final_url, chain, headers, body). Never raises for an HTTP
     status; a transport failure is returned as status 0 with the reason, so a
     host that refuses one side is a reported difference rather than a crash."""
     opener = urllib.request.build_opener(_NoRedirect)
-    chain, cur = [], url
+    chain, cur, requested = [], url, []
     for _ in range(max_hops + 1):
+        requested.append(cur)
         if not allowed(cur):
             return 0, cur, chain, {}, "", "robots.txt disallows this path"
         req = urllib.request.Request(cur, headers={
@@ -154,6 +190,9 @@ def fetch(url, max_hops=6):
         if status in (301, 302, 303, 307, 308) and hdrs.get("Location"):
             nxt = urllib.parse.urljoin(cur, hdrs["Location"])
             chain.append((status, nxt))
+            if loop_in(requested + [nxt]):
+                return (0, cur, chain, {}, "",
+                        LOOP % (status, same_host_path(nxt, url)))
             cur = nxt
             continue
         enc = (hdrs.get("Content-Encoding") or "").lower()
@@ -260,8 +299,7 @@ def load_expect(path):
 
 
 def diff_path(old_base, new_base, path, hosts):
-    rows = []
-    sides = {}
+    rows, broken, sides = [], [], {}
     for side, base in (("old", old_base), ("new", new_base)):
         url = urllib.parse.urljoin(base, path)
         st, fin, chain, hdrs, body, err = fetch(url)
@@ -269,13 +307,15 @@ def diff_path(old_base, new_base, path, hosts):
             sides[side] = {f: "-" for f in FIELDS}
             sides[side]["status"] = "ERR"
             sides[side]["redirect"] = err
+            if err.startswith("redirect loop:"):
+                broken.append((side, err))
         else:
             sides[side] = read_page(url, st, fin, chain, hdrs, body, hosts)
     for f in FIELDS:
         a, b = sides["old"].get(f, "-"), sides["new"].get(f, "-")
         if a != b:
             rows.append((f, a, b))
-    return rows
+    return rows, broken
 
 
 def selftest():
@@ -311,6 +351,17 @@ def selftest():
         ("link written by script not counted", "/never/" not in a["links"]),
         ("robots merged and lower-cased", a["robots"] == "index,follow"),
     ]
+    checks += [
+        ("a chain that returns is a loop",
+         loop_in(["https://e.test/p", "https://e.test/q",
+                  "https://e.test/p"]) == "https://e.test/p"),
+        ("a self-redirect is a loop at the first hop",
+         loop_in(["https://e.test/p", "https://e.test/p"]) == "https://e.test/p"),
+        ("a long chain that never returns is not a loop",
+         loop_in(["https://e.test/%d" % n for n in range(8)]) is None),
+        ("a trailing slash is a different URL, not a loop",
+         loop_in(["https://e.test/p", "https://e.test/p/"]) is None),
+    ]
     hdr = read_page("https://example.com/y/", 200, "https://example.com/y/", [],
                     {"X-Robots-Tag": "noindex"}, "<html><head></head><body></body></html>",
                     hosts)
@@ -342,10 +393,21 @@ def main():
 
     undeclared = 0
     changed_paths = 0
+    loops = 0
     for p in paths:
-        rows = diff_path(a.old, a.new, p, hosts)
+        rows, broken = diff_path(a.old, a.new, p, hosts)
+        if broken:
+            # Printed before the comparison, because a loop on both sides
+            # makes every field equal and the path would otherwise read SAME.
+            # One header for the path and one line per side, so a loop that is
+            # only on one of them is visible as that rather than as two.
+            loops += len(broken)
+            print("BROKEN   %s" % p)
+            for side, why in broken:
+                print("    %-11s %-10s %s: %s" % ("redirect", "LOOP", side, why))
         if not rows:
-            print("SAME     %s" % p)
+            if not broken:
+                print("SAME     %s" % p)
             continue
         changed_paths += 1
         print("CHANGED  %s" % p)
@@ -371,8 +433,17 @@ def main():
             print("    %-11s %-10s old: %s" % (f, mark, old[:300]))
             print("    %-11s %-10s new: %s" % ("", "", new[:300]))
 
+    # The summary line keeps its shape whatever happens, because it is quoted
+    # in the published transcripts; a loop gets its own line above it rather
+    # than a fourth clause here.
+    if loops:
+        print("\n%d redirect loop(s)" % loops)
     print("\n%d path(s) read, %d changed, %d undeclared field change(s)"
           % (len(paths), changed_paths, undeclared))
+    if loops:
+        print("FAIL: a redirect loop shows the visitor nothing, and --expect "
+              "cannot declare one - no release is meant to contain it.")
+        return 3
     if undeclared:
         print("FAIL: a release that changes these fields without declaring them is "
               "the failure this tool exists for.")
