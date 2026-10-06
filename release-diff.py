@@ -79,6 +79,9 @@ UA = "plantroom-release-diff/1.0 (+https://plantroomlabs.com)"
 TIMEOUT = 25
 FIELDS = ("status", "redirect", "title", "h1", "has_h1", "canonical",
           "robots", "description", "links", "tags", "jsonld")
+# The two fields whose value is a set rather than a sentence. They are
+# reported as a difference: see the print loop in main().
+SET_FIELDS = ("links", "tags")
 
 # A measurement snippet is identified by the string its own vendor requires,
 # not by a script filename, because the filename is what a bundler changes.
@@ -350,6 +353,21 @@ def main():
             mark = "declared" if (p, f) in declared else "UNDECLARED"
             if mark == "UNDECLARED":
                 undeclared += 1
+            if f in SET_FIELDS:
+                # A set of several hundred link paths printed as two truncated
+                # strings is two strings that look the same. One added link is
+                # the whole finding, so print the difference, not the sides.
+                # Not `a` and `b`: `a` is the argparse namespace in this
+                # scope, and shadowing it made the second path crash.
+                was = set(old.split()) - {"-"}
+                now = set(new.split()) - {"-"}
+                for tok in sorted(now - was):
+                    print("    %-11s %-10s added:   %s" % (f, mark, tok))
+                    f = ""
+                for tok in sorted(was - now):
+                    print("    %-11s %-10s removed: %s" % (f, mark, tok))
+                    f = ""
+                continue
             print("    %-11s %-10s old: %s" % (f, mark, old[:300]))
             print("    %-11s %-10s new: %s" % ("", "", new[:300]))
 
